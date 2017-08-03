@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,23 +16,23 @@ import (
 )
 
 type config struct {
-	DryRun      bool     `json:"-"`
-	Verbose     bool     `json:"-"`
-	Save        bool     `json:"-"`
-	Proc        int      `json:"proc"`
-	Type        string   `json:"type"`
-	FilelistExt string   `json:"-"`
-	SrcDir      string   `json:"src_dir"`
-	DestDir     string   `json:"dest_dir"`
-	ListDir     string   `json:"base_dir"`
-	Ext         string   `json:"ext"`
-	VipsFmt     string   `json:"vips_fmt"`
-	LogName     string   `json:"log"`
-	StdoutLog   string   `json:"stdout"`
-	StderrLog   string   `json:"stderr"`
-	Log         *os.File `json:"-"`
-	Stdout      *os.File `json:"-"`
-	Stderr      *os.File `json:"-"`
+	DryRun      bool      `json:"-"`
+	Verbose     bool      `json:"-"`
+	Save        bool      `json:"-"`
+	Proc        int       `json:"proc"`
+	Type        string    `json:"type"`
+	FilelistExt string    `json:"-"`
+	SrcDir      string    `json:"src_dir"`
+	DestDir     string    `json:"dest_dir"`
+	ListDir     string    `json:"base_dir"`
+	Ext         string    `json:"ext"`
+	VipsFmt     string    `json:"vips_fmt"`
+	LogName     string    `json:"log"`
+	StdoutLog   string    `json:"stdout"`
+	StderrLog   string    `json:"stderr"`
+	Log         io.Writer `json:"-"`
+	Stdout      io.Writer `json:"-"`
+	Stderr      io.Writer `json:"-"`
 }
 
 var (
@@ -45,7 +46,7 @@ func loadConfig() (*config, error) {
 		Save:        false,
 		DryRun:      false,
 		Verbose:     false,
-		Proc:        8,
+		Proc:        4,
 		Type:        "files",
 		FilelistExt: ".txt",
 		SrcDir:      "src",
@@ -99,7 +100,8 @@ func saveConfig(cfg *config) error {
 		return err
 	}
 
-	fmt.Printf("%s was successfully saved.\n", confFile)
+	cfg.Log.Write([]byte(fmt.Sprintf("info: %s was successfully saved.\n",
+		confFile)))
 	return nil
 }
 
@@ -123,7 +125,8 @@ func filelistWalk(cfg *config, q chan string) error {
 			if filepath.Ext(path) != cfg.FilelistExt {
 				// skip
 				if cfg.Verbose {
-					fmt.Printf("filelist skip (ext): %s\n", path)
+					cfg.Log.Write([]byte(fmt.Sprintf("filelist skip (ext): %s\n",
+						path)))
 				}
 				return nil
 			}
@@ -134,7 +137,7 @@ func filelistWalk(cfg *config, q chan string) error {
 			defer f.Close()
 
 			if cfg.Verbose {
-				fmt.Printf("filelist: %s\n", path)
+				cfg.Log.Write([]byte(fmt.Sprintf("filelist: %s\n", path)))
 			}
 
 			scanner := bufio.NewScanner(f)
@@ -148,21 +151,6 @@ func filelistWalk(cfg *config, q chan string) error {
 		})
 }
 
-// func mkDestDir(cfg *config, path string) error {
-// 	rel, err := filepath.Rel(cfg.SrcDir, path)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	path = filepath.Join(cfg.DestDir, rel)
-// 	if cfg.Verbose {
-// 		fmt.Printf("mkdir: %s\n", path)
-// 	}
-// 	if !cfg.DryRun {
-// 		return os.Mkdir(path, 0755)
-// 	}
-// 	return nil
-// }
-
 func doVips(cfg *config, wg *sync.WaitGroup, q chan string) {
 	defer wg.Done()
 	for {
@@ -173,13 +161,13 @@ func doVips(cfg *config, wg *sync.WaitGroup, q chan string) {
 
 		if filepath.Ext(src) != cfg.Ext {
 			if cfg.Verbose {
-				fmt.Printf("skip (ext): %s\n", src)
+				cfg.Log.Write([]byte(fmt.Sprintf("skip (ext): %s\n", src)))
 			}
 			continue
 		}
 		rel, err := filepath.Rel(cfg.SrcDir, src)
 		if err != nil {
-			fmt.Printf("%s", err)
+			cfg.Log.Write([]byte(fmt.Sprintf("error: %s\n", err)))
 			continue
 		}
 		dest := filepath.Join(cfg.DestDir, rel)
@@ -188,7 +176,7 @@ func doVips(cfg *config, wg *sync.WaitGroup, q chan string) {
 		}
 
 		if cfg.Verbose {
-			fmt.Println(src, "->", dest)
+			cfg.Log.Write([]byte(fmt.Sprintf("%s -> %s\n", src, dest)))
 		}
 		if !cfg.DryRun {
 			os.MkdirAll(filepath.Dir(dest), 0755)
@@ -198,7 +186,7 @@ func doVips(cfg *config, wg *sync.WaitGroup, q chan string) {
 			cmd.Stdout = cfg.Stdout
 			cmd.Stderr = cfg.Stderr
 			if err := cmd.Run(); err != nil {
-				fmt.Printf("error: %s: %s\n", s, err)
+				cfg.Log.Write([]byte(fmt.Sprintf("error: %s:\n  %s\n", s, err)))
 			}
 		}
 	}
@@ -253,29 +241,33 @@ func main() {
 		cfg.Verbose = true
 	}
 	if cfg.LogName != "" {
-		/* todo */
-		// cfg.Log, err = os.Create(cfg.LogName)
-		// if err != nil {
-		// 	exitOnError(err)
-		// }
+		logfile, err := os.Create(cfg.LogName)
+		if err != nil {
+			exitOnError(err)
+		}
+		defer logfile.Close()
+		cfg.Log = io.MultiWriter(os.Stdout, logfile)
+	} else {
+		cfg.Log = os.Stdout
 	}
 	if cfg.StdoutLog != "" {
 		cfg.Stdout, err = os.Create(cfg.StdoutLog)
 		if err != nil {
 			exitOnError(err)
 		}
-		defer cfg.Stdout.Close()
+		defer cfg.Stdout.(*os.File).Close()
 	}
 	if cfg.StderrLog != "" {
 		cfg.Stderr, err = os.Create(cfg.StderrLog)
 		if err != nil {
 			exitOnError(err)
 		}
-		defer cfg.Stderr.Close()
+		defer cfg.Stderr.(*os.File).Close()
 	}
 	if cfg.Type != "files" {
 		if cfg.Type[0:8] != "filelist" {
-			exitOnError(errors.New("type must be \"files\" or \"filelist[.{ext}]\""))
+			exitOnError(errors.New(
+				"type must be \"files\" or \"filelist[.{ext}]\""))
 		} else {
 			cfg.FilelistExt = cfg.Type[8:]
 		}
@@ -293,8 +285,8 @@ func main() {
 	cfg.DestDir = filepath.FromSlash(cfg.DestDir)
 	cfg.ListDir = filepath.FromSlash(cfg.ListDir)
 
-	if cfg.DryRun {
-		fmt.Printf("config: %#v\n", cfg)
+	if cfg.Verbose {
+		cfg.Log.Write([]byte(fmt.Sprintf("config: %#v\n", cfg)))
 	}
 
 	// prepare workers
@@ -307,11 +299,11 @@ func main() {
 	// do queuing
 	if cfg.Type == "files" {
 		if err = filesWalk(cfg, q); err != nil {
-			fmt.Printf("error: %v\n", err)
+			cfg.Log.Write([]byte(fmt.Sprintf("error: %s\n", err)))
 		}
 	} else {
 		if err = filelistWalk(cfg, q); err != nil {
-			fmt.Printf("error: %v\n", err)
+			cfg.Log.Write([]byte(fmt.Sprintf("error: %s\n", err)))
 		}
 	}
 
